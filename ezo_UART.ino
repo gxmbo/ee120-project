@@ -6,6 +6,9 @@ const int buttonPin = 7;
 const int servoPin = 5;
 const int fanPin = 3;
 
+const int intThermo = 12;
+const int extThermo = 13;
+
 // DEFINE VARIABLES
 const int servoSpeed = 50; // ms per degree, higher = slower
 int currentAngle = 0;
