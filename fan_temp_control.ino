@@ -17,6 +17,9 @@ const int fanPin      = 3;
 const int insidePin   = 2;   // Inside sensor
 const int outsidePin  = 4;   // Outside sensor
 
+const int redPin      = 11; // Red RGB LED 
+const int greenPin    = 12; // Green RGB LED
+const int bluePin     = 13; // Blue RGB LED
 
 // ── TEMPERATURE SETTINGS ────────────────────────────────────
 const float TEMP_ON_THRESHOLD  = 80.0;  // °F — auto-enable fan above this
@@ -102,6 +105,10 @@ void loop() {
       applyMode(manualMode);
     }
   }
+
+ // 3... ish?.  Set RGB LED color based on the mode!
+  modeColor(manualMode);
+  
   lastButtonState = buttonState;
 }
 
@@ -175,4 +182,33 @@ void moveServo(int targetAngle) {
     servo.write(currentAngle);
     delay(servoSpeed);
   }
+}
+
+// ============================================================
+// Changes color based on mode!
+// ============================================================
+void modeColor(int mode) {
+  // sets everything to 0 by default
+  digitalWrite(redPin,0);
+  digitalWrite(greenPin,0);
+  digitalWrite(bluePin,0);
+
+  switch (mode) {
+    case 0: // always OFF
+      digitalWrite(redPin,1); // set to red
+      break;
+    case 1: // always ON
+      digitalWrite(greenPin,1); // set to green
+      break;
+    case 2: // threshold
+      digitalWrite(bluePin,1); // set to blue
+      break;
+    case 3: // comparison
+      digitalWrite(redPin,1); // set to yellow
+      digitalWrite(greenPin,1);
+      break;
+    default: // in case something's wrong
+      digitalWrite(redPin,1); // set to white
+      digitalWrite(greenPin,1);
+      digitalWrite(bluePin,1);
 }
