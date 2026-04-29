@@ -1,72 +1,62 @@
 // ============================================================
 //  Fan + Servo Controller with Dual Temperature Sensors
-//  - Button manually cycles fan modes (off > low > med > full)
+//  - Button manually cycles fan modes
 //  - Inside sensor auto-enables fan if temp exceeds threshold
-//  - Outside sensor is logged for reference
+//  - Outside sensor logged for reference
+//  - 5 minute cooldown prevents rapid open/close cycling
 // ============================================================
 
 #include <Servo.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-
 // ── PINS ────────────────────────────────────────────────────
 const int buttonPin   = 7;
 const int servoPin    = 5;
 const int fanPin      = 3;
-const int insidePin   = 2;   // Inside sensor
-const int outsidePin  = 4;   // Outside sensor
-
+const int insidePin   = 2;
+const int outsidePin  = 4;
+const int redPin      = 8;   // add your actual pin numbers
+const int greenPin    = 9;
+const int bluePin     = 10;
 
 // ── TEMPERATURE SETTINGS ────────────────────────────────────
-const float TEMP_ON_THRESHOLD  = 80.0;  // °F — auto-enable fan above this
-const float TEMP_OFF_THRESHOLD = 75.0;  // °F — auto-disable fan below this (hysteresis)
-const int   TEMP_READ_INTERVAL = 2000;  // ms between temperature reads
+const float high_temp = 72.0;
+const float low_temp  = 55.0;
+const int   TEMP_READ_INTERVAL = 2000;
 
+// ── COOLDOWN SETTING ────────────────────────────────────────
+const unsigned long GRATE_COOLDOWN = 300000; // 5 minutes in ms
 
-// ── FAN MODES ───────────────────────────────────────────────
-//  { servoAngle, fanSpeed }
-//  servoAngle : 0 = closed, 90 = open
-//  fanSpeed   : 0 = off, 255 = full power
-//int modeMatrix[][2] = {
- // {0,   0  },  // Mode 0: closed, fan off
- // {90,  255}   // Mode 1: open,   fan full
-//};
-//const int totalModes = sizeof(modeMatrix) / sizeof(modeMatrix[0]);
-
-int fan_off=0;
-int fan_on=255;
-int closed=0;
-int open=90;
-int total_modes=3;
-int mode=0;
+// ── FAN / GRATE STATES ──────────────────────────────────────
+int fan_off      = 0;
+int fan_on       = 255;
+int grate_closed = 0;
+int grate_open   = 90;
+int total_modes  = 4;
+int mode         = 0;
 
 // ── STATE VARIABLES ─────────────────────────────────────────
-int  manualMode      = 0;      // Mode selected by the button
-int  activeMode      = 0;      // Mode actually applied (may be overridden by temp)
-bool autoOverride    = false;  // True when temp control has taken over
-bool lastButtonState = HIGH;
-unsigned long lastTempRead = 0;
+bool lastButtonState        = HIGH;
+unsigned long lastTempRead  = 0;
+unsigned long lastGrateMove = 0;   // tracks when grate last changed
+bool grateIsOpen            = false; // tracks current grate state
 
 float tempInside  = 0.0;
 float tempOutside = 0.0;
 
-
 // ── OBJECTS ─────────────────────────────────────────────────
 Servo servo;
-
 OneWire insideWire(insidePin);
 OneWire outsideWire(outsidePin);
 DallasTemperature insideSensors(&insideWire);
 DallasTemperature outsideSensors(&outsideWire);
 
-
 // ── FUNCTION DECLARATIONS ───────────────────────────────────
-void  applyMode(int m);
-void  moveServo(int targetAngle);
-void  readTemperatures();
-void  checkAutoControl();
-
+void moveServo(int targetAngle);
+void readTemperatures();
+void fan_state(int mode, int open_close, int fan_on_off);
+void modeColor(int mode);
 
 // ============================================================
 void setup() {
@@ -77,11 +67,13 @@ void setup() {
   servo.attach(servoPin);
   pinMode(buttonPin, INPUT_PULLUP);
   pinMode(fanPin, OUTPUT);
+  pinMode(redPin, OUTPUT);
+  pinMode(greenPin, OUTPUT);
+  pinMode(bluePin, OUTPUT);
 
-  applyMode(0);
+  fan_state(0, grate_closed, fan_off);
   Serial.println("System initialized.");
 }
-
 
 // ============================================================
 void loop() {
@@ -90,34 +82,73 @@ void loop() {
   if (millis() - lastTempRead >= TEMP_READ_INTERVAL) {
     lastTempRead = millis();
     readTemperatures();
-    checkAutoControl();
   }
 
   // 2. Check for button press (HIGH → LOW transition)
   bool buttonState = digitalRead(buttonPin);
   if (buttonState == LOW && lastButtonState == HIGH) {
     delay(50); // debounce
-
     mode = (mode + 1) % total_modes;
     Serial.print("Button pressed: Mode= ");
     Serial.println(mode);
-
-    // Only apply manual mode if auto-override is not active,
-    // or if the user is choosing a higher mode than the override
   }
   lastButtonState = buttonState;
-  
-// ============================================================
-// Changes color based on mode!
-// ============================================================
-if(mode==0);
+
+  // 3. Apply mode logic
   modeColor(mode);
-  moveServo(closed);
-  analogWrite(fanPin, fan_off);
+
+  if (mode == 0) {
+    fan_state(mode, grate_closed, fan_off);
+  }
+  else if (mode == 1) {
+    fan_state(mode, grate_open, fan_on);
+  }
+  else if (mode == 2) {
+    if (tempInside == DEVICE_DISCONNECTED_F) return;
+    if (tempInside >= low_temp && tempOutside <= high_temp && tempInside >= tempOutside) {
+      trySetGrate(true, mode);
+    } else {
+      trySetGrate(false, mode);
+    }
+  }
+  else if (mode == 3) {
+    if (tempInside > tempOutside && tempInside > low_temp) {
+      trySetGrate(true, mode);
+    } else {
+      trySetGrate(false, mode);
+    }
+  }
 }
 
-  
+// ============================================================
+//  Attempt to open or close grate — respects 5 min cooldown
+// ============================================================
+void trySetGrate(bool shouldOpen, int mode) {
+  // Check if enough time has passed since last grate movement
+  unsigned long timeSinceLastMove = millis() - lastGrateMove;
+  bool cooldownExpired = timeSinceLastMove >= GRATE_COOLDOWN;
 
+  // Only act if the desired state differs from current state
+  if (shouldOpen == grateIsOpen) return; // already in correct state, do nothing
+
+  if (!cooldownExpired) {
+    Serial.print("Cooldown active. ");
+    Serial.print((GRATE_COOLDOWN - timeSinceLastMove) / 1000);
+    Serial.println("s remaining.");
+    return; // too soon, don't change
+  }
+
+  // Cooldown has passed — make the change
+  if (shouldOpen) {
+    fan_state(mode, grate_open, fan_on);
+    grateIsOpen = true;
+  } else {
+    fan_state(mode, grate_closed, fan_off);
+    grateIsOpen = false;
+  }
+
+  lastGrateMove = millis(); // reset the cooldown timer
+}
 
 // ============================================================
 //  Read both sensors and print to Serial
@@ -136,85 +167,45 @@ void readTemperatures() {
   Serial.print("Outside: "); Serial.print(tempOutside); Serial.println(" °F");
 }
 
-
 // ============================================================
-//  Auto-enable or disable fan based on inside temperature
+//  Set fan and servo state, print to Serial
 // ============================================================
-void checkAutoControl() {
-  if (tempInside == DEVICE_DISCONNECTED_F) return; // Don't act on bad data
-
-  if (!autoOverride && tempInside >= TEMP_ON_THRESHOLD) {
-    // Temp too high — kick on Mode 1 (full)
-    autoOverride = true;
-    Serial.println("Auto ON: inside temp exceeded threshold.");
-    if (activeMode < 1) applyMode(1);
-
-  } else if (autoOverride && tempInside <= TEMP_OFF_THRESHOLD) {
-    // Cooled down — return to whatever the button had set
-    autoOverride = false;
-    Serial.println("Auto OFF: inside temp back to normal.");
-    applyMode(manualMode);
-  }
+void fan_state(int mode, int open_close, int fan_on_off) {
+  Serial.print("Mode: ");
+  Serial.print(mode);
+  Serial.print(" engaged, fan speed: ");
+  Serial.println(fan_on_off);
+  moveServo(open_close);
+  analogWrite(fanPin, fan_on_off);
 }
 
-
 // ============================================================
-//  Apply a mode: set servo angle and fan speed
-// ============================================================
-void applyMode(int m) {
-  activeMode = m;
-  int targetAngle = modeMatrix[m][0];
-  int fanSpeed    = modeMatrix[m][1];
-
-  Serial.print("Applying mode "); Serial.print(m);
-  Serial.print(" — angle: "); Serial.print(targetAngle);
-  Serial.print(", fan: ");    Serial.println(fanSpeed);
-
-  analogWrite(fanPin, fanSpeed);
-  moveServo(targetAngle);
-}
-
-
-// ============================================================
-//  Move servo one degree at a time (smooth, controlled speed)
+//  Move servo one degree at a time (smooth motion)
 // ============================================================
 void moveServo(int targetAngle) {
-  const int servoSpeed = 50; // ms per degree — higher = slower
+  const int servoSpeed = 50;
   int currentAngle = servo.read();
-
   int step = (targetAngle > currentAngle) ? 1 : -1;
   while (currentAngle != targetAngle) {
     currentAngle += step;
     servo.write(currentAngle);
     delay(servoSpeed);
   }
-  
+}
 
 // ============================================================
-// Changes color based on mode!
+//  Set RGB LED color based on mode
 // ============================================================
 void modeColor(int mode) {
-  // sets everything to 0 by default
-  digitalWrite(redPin,0);
-  digitalWrite(greenPin,0);
-  digitalWrite(bluePin,0);
+  digitalWrite(redPin,   0);
+  digitalWrite(greenPin, 0);
+  digitalWrite(bluePin,  0);
 
   switch (mode) {
-    case 0: // always OFF
-      digitalWrite(redPin,1); // set to red
-      break;
-    case 1: // always ON
-      digitalWrite(greenPin,1); // set to green
-      break;
-    case 2: // threshold
-      digitalWrite(bluePin,1); // set to blue
-      break;
-    case 3: // comparison
-      digitalWrite(redPin,1); // set to yellow
-      digitalWrite(greenPin,1);
-      break;
-    default: // in case something's wrong
-      digitalWrite(redPin,1); // set to white
-      digitalWrite(greenPin,1);
-      digitalWrite(bluePin,1);
+    case 0: digitalWrite(redPin, 1);                              break; // red
+    case 1: digitalWrite(greenPin, 1);                            break; // green
+    case 2: digitalWrite(bluePin, 1);                             break; // blue
+    case 3: digitalWrite(redPin, 1); digitalWrite(greenPin, 1);   break; // yellow
+    default: digitalWrite(redPin,1); digitalWrite(greenPin,1); digitalWrite(bluePin,1); break; // white
+  }
 }
